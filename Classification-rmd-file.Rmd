@@ -1,0 +1,409 @@
+---
+title: "RapportMRR"
+author: "ZAARI & SEDJARI"
+date: "17/11/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup, include=FALSE , echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r , echo=FALSE , message=FALSE}
+rm(list=ls())
+graphics.off()
+library(ggplot2)
+library(corrplot)
+library(glmnet)
+library(scales)
+library(gridExtra)
+library(ROCR)
+library(naniar)
+library(VIM)
+library(dplyr)
+library(factoextra)
+library(FactoMineR)
+library(psych)
+library(cluster)
+library(tidyverse)
+library(pROC)
+library(caret)
+
+```
+```{r, echo=FALSE , include=FALSE}
+library(readxl)
+data <- read_excel("C://Users//Lenovo//Desktop//Mes fichiers//ENSIIE//S3_ZAARI//Régression régularisée//Project//Data_Cortex_Nuclear.xls")
+data$MouseID <- NULL
+```
+# Description du jeu de donnée:
+* L'ensemble de données contient les niveaux d'expression de ***77 proteines***
+mesurées dans le cortex cérébral de ***8 classes*** de souris témoins et 
+trisomiques exposées au conditionnement de la peur contextuelle,une tâche utilisée pour évaluer l'apprentissage des souris.
+
+* Lors de ce rapport nous allons se consacrer d'une **exploration des données** les bien comprendre et aussi pour avoir une idée claire pour la partie modélisation du modèle.
+
+## I- *Représentation de nombre des données manquantes*
+* Le graphique montre le pourcentage réel des valeurs manquantes et présentes
+pour chaque variable de notre jeu de données.
+```{r, echo=FALSE  ,fig.align="center" , fig.height=3 , fig.width=6}
+vis_miss(data, sort_miss = FALSE) 
+
+```
+      **Figure 1:** *Graphique montrant le pourcentage des variables manquantes et présentes*
+      
+* Afin de résoudre le problème des variables manquantes on remplace les 
+valeurs par des moyennes par chaque groupe, ensuite on transforme les variables quantitatives à des variables 
+qualitatives.
+```{r , echo=FALSE ,message=FALSE, include=FALSE}
+data <- data %>%
+  group_by(class) %>%
+  mutate_each(funs(replace(., which(is.na(.)), mean(., na.rm=TRUE)))) %>%
+  as.data.frame()
+#mycols <- c("#E59866", "#DC7633", "#BA4A00", "#BDC3C7","#717D7E",
+            #"#616A6B", "#85C1E9", "#154360")
+```
+```{r}
+data_1 <- data
+```
+
+## II- *La corrélation entre les variables*
+* Maintenant on va visualiser la corrélation des variables pour avoir une idée claire sur la dépendance des variables.
+```{r ,echo=FALSE , fig.align='center' , fig.height=3.4, fig.width=8}
+data$class <- as.numeric(factor(data$class))
+data$Behavior <- as.numeric(factor(data$Behavior)) - 1
+data$Treatment <- as.numeric(factor(data$Treatment))
+data$Genotype <- as.numeric(factor(data$Genotype))
+mycol <- c("#85C1E9", "#154360","#E59866")
+M <- cor(data)
+corrplot(M,tl.col = "black",tl.cex=0.25,type="full",method="color",
+         col = colorRampPalette(mycol)(100))
+```
+**Figure 2:** *Matrice de corrélation des variables*
+
+* On peut analyser et déduire d'après la matrice de corrélation qu'a proximativement le 1/3 des variables sont corrélées entre eux et spécialement ceux qui représentent les types de protéines, donc surement lors de l'étape de modélisation on va s'en servir d'une des méthodes de sélection des modèles*(stepwise, forward ...)*
+
+## III- *Visualisations des données avec l'ACP*
+```{r ,echo=FALSE , warning =FALSE ,fig.align="center" , fig.height=4.5 , fig.width=10}
+res.pca <- prcomp(data, scale = TRUE, center=TRUE)
+
+p1 <- fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Colorer par le cos2
+             gradient.cols = c("#F54D1C","#00AFBB", "#E7B800", "#FC4E07","#1C0E6D"),
+             repel = TRUE     
+)
+
+p2 <- fviz_pca_var(res.pca,
+             col.var = "contrib", 
+             gradient.cols = c("#F54D1C","#00AFBB", "#E7B800", "#FC4E07","#1C0E6D"),
+             repel = TRUE     
+)
+
+grid.arrange(p1,p2,ncol=2,nrow=1)
+
+
+```
+   **Figure 3:** *Graphique d'ACP des données*
+   
+* On peut analyser de ces 2 graphiques d'ACP que les variables qui ont fortement contribué à PC1 sont *Treatment*, *behavior*, *class* et *Genotype*, pour la majorité des types de protéines ont bien contribué à PC2, aussi on analyse une forte corrélation entre les différents types de protéines, et il existe des valeurs aberrantes considérables dans les données.
+* D'après cette analyse on peut conclure que la réduction de la dimensionnalité peut être effectuée à l'aide de cet ensemble de données, c'est-à-dire réaliser **une classification K means** des différentes 8 classes des rats et on les regroupent selon leur *behavior*, alors finalement on se réduit à un problème de deux dimensions.
+
+#I. Description du premier modèle:
+
+Notre problème généralement c'est un problème de classification du **Behavior** des souris en deux groupes *simulé pour apprendre (CS / SC)*, c'est une variable binaire qui correspond à une affirmation ou non d'apprentissage des souris, donc afin de résoudre et donne une approche à ce type de problème de classification, travaillons d'abord par premier modèle qui est une **régression logisitique** simple.
+Donc pour l'application du modèle tout d'abord on doit diviser notre base de données en deux, une base d’apprentissage et une autre pour le test qui sert à évaluer les performances.
+Nous appliquons la fonction **glm()** à l’échantillon d’apprentissage.
+```{r, echo=FALSE , include=FALSE}
+data_Split <- sort(sample(nrow(data),nrow(data)*.70))
+train <- data[data_Split,]
+test <- data[-data_Split,]
+#reg1 <- glm(Behavior ~ ., data = train, family = "binomial")
+```
+
+Comme résultat on reçoit un message d'erreur indiquant la non convergence du modèle de l’algorithme, donc travailler avec un modèle de régression logistique simple c'est pas un bon choix ce modèle est inutilisable. Certains coefficients n’ont pas été estimés nous ne pouvons ni les interpréter, ni les déployer dans la base du test pour mesurer les performances du modèle.
+
+
+#II. Régression régularisée
+##II.1 *Régression Ridge*
+* Comme  on  a  pu concevoir  la  non  convergence  du  précédent  modèle  signifie  un  mauvais  choix  de 
+sélection du modèle, si ainsi nous testons un autre modèle c'est le cas d'une régression Ridge afin de 
+prédire et classifier notre variable binaire Behavior. 
+
+* La  régression  ridge correspond  à  un  coefficient  de 
+paramétrage lambda > 0 ainsi le paramètre alpha = 0 qui 
+définit une régression Ridge, pour l'application du modèle 
+on utilise la fonction glmnet(). 
+```{r , echo=TRUE , include=TRUE}
+# Variables prédictives
+set.seed(44)
+X <- model.matrix(Behavior~., data= train)[,-1]
+# Variable de résultat (Target)
+Y<- train$Behavior
+ridge <- glmnet(X,Y,family="binomial",standardize=FALSE,alpha=0)
+plot(ridge , xvar = "lambda")
+```
+
+* A l’issue de l’apprentissage, nous disposons d’un vecteur de 
+coefficients βi pour chaque λi, et comme on peut avoir dans 
+la figure ci-dessus les différents coefficients de Ridge mais qui nous 
+intéresse le plus c’est la valeur de lambda optimale, donc 
+comment on peut bien l’identifier ?  
+
+* Il existe une solution qui consiste à passer par la validation 
+croisée,  qui  ne  fait  intervenir  que  l’échantillon 
+d’apprentissage,  d’où  nous  faisons  appel  à  la  fonction 
+cv.glmnet(), ensuite on va afficher on va ploter la relation 
+des  valeurs  de  log(λ)  avec  le  taux  d’erreur  moyen  en 
+validation croisée comme on peut voir dans la figure ci-
+dessous. 
+```{r ,echo=FALSE , include=FALSE}
+set.seed(44)
+cv.ridge2 <- cv.glmnet(X,Y,family="binomial",type.measure="class",
+ nfolds=10,alpha=0,keep=TRUE)
+```
+
+
+```{r ,echo=TRUE , include=TRUE}
+plot(cv.ridge2)
+```
+
+```{r}
+best_lambda <-cv.ridge2$lambda.min
+best_lambda
+```
+* Donc maintenant on va identifier la valeur de lambda qui 
+minimise  l’erreur  et  on  trouve  comme  résultat  de 
+compilation  0.10635,  cette  coordonnée  est  matérialisée 
+par le premier trait pointillé (à gauche) dans la figure ci-dessus de la 
+validation croisée.  
+* Prédiction sur l’échantillon test, dans cette étape on ajuste 
+le  modèle  final  sur  les  données  d’entraînement  afin  de 
+réaliser  des  prédictions,  comme  résultat  affichons  tout 
+d’abord notre matrice de confusion.
+```{r , echo=FALSE }
+model <- glmnet(X, Y, alpha = 0, lambda = best_lambda)
+X_test <- model.matrix(Behavior ~., test)[,-1]
+pred_Ridge <- predict(cv.ridge2 ,s=best_lambda,newx= X_test)
+pred_Ridge <- ifelse(pred_Ridge>0.5,1,0)
+tab_prediction <- table(prediction=pred_Ridge,actuelle=test$Behavior)
+tab_prediction
+```
+```{r}
+model_accuracy <- (sum(diag(tab_prediction))/sum(tab_prediction))*100
+paste("La précision de notre modèle est",model_accuracy,"%")
+```
+ensuite on trouve comme précision du modèle est 
+99.6913%, qui est une bonne précision on teste un autre modèle c’est le cas pour 
+modèle Lasso  
+
+##II.2 *Régression Lasso*
+
+* Pour la Régression Lasso on va réaliser le même traitement 
+que précédemment pour Ridge la seule différence c’est dans 
+alpha qu’on va la prendre alpha=1, et on trouve les résultats 
+suivants : 
+```{r}
+Lasso <- glmnet(X,Y,family="binomial",standardize=FALSE,alpha=1)
+set.seed(44)
+cv.lasso2 <- cv.glmnet(X,Y,family="binomial",type.measure="class",
+ nfolds=10,alpha=1,keep=TRUE)
+plot(Lasso, xvar = "lambda")
+```
+```{r}
+plot(cv.lasso2)
+```
+```{r}
+tab_prediction
+```
+
+```{r}
+pred_Lasso <- predict(cv.lasso2,s=cv.lasso2$lambda.min,newx= X_test)
+pred_Lasso <- ifelse(pred_Lasso>0.5,1,0)
+tab_prediction <- table(prediction=pred_Lasso,actuelle=test$Behavior)
+model_accuracy <- (sum(diag(tab_prediction))/sum(tab_prediction))*100
+paste("La précision de notre modèle est",model_accuracy,"%")
+```
+
+
+```{r}
+RMSE_lasso <- sqrt(mean(pred_Lasso-test$Behavior)^2)
+RMSE_Ridge <- sqrt(mean(pred_Ridge-test$Behavior)^2)
+SSE_lasso <- sum((pred_Lasso - test$Behavior)^2)
+SSE_Ridge <- sum((pred_Ridge - test$Behavior)^2)
+SST <- sum((test$Behavior - mean(test$Behavior))^2)
+#RMSE et R squared
+results_RMSE <- data.frame(RMSE_RIDGE=RMSE_Ridge,
+                           RMSE_LASSO=RMSE_lasso,
+                           R_SQUARED_RIDGE=1-(SSE_Ridge/SST),
+                           R_SQUARED_lasso=1-(SSE_lasso/SST))
+results_RMSE
+```
+
+on  terme  de  prédiction  on  peut  voir  les 
+résultats  de  la  matrice  de  confusion,  et  comme 
+précision du modèle on trouve 98.4567%, qui est aussi une bonne précision. 
+
+#III. Un modèle avec K means
+* Pour  ce  4 ème   modèle  on  va  tester  de  réaliser  une 
+classification  tout  en  utilisant  l’apprentissage  non 
+supervisé  qui est KMeans c’est  un  algorithme  de 
+clustering qui  divise  les observations  en  k  clusters. 
+Puisque nous pouvons dicter le nombre de clusters, 
+il peut être facilement utilisé dans la classification 
+où nous divisons les données en clusters qui peuvent 
+être égaux ou supérieurs au nombre de classes.
+
+* Dans notre cas on veut classifier l’apprentissage des 
+rats (« CS » / »SC »), pour ce faire on va utiliser la 
+fonction kmeans ensuite pour avoir une idée claire sur 
+la classificzation faite on plotedonc on peut visualiser 
+dans la figure les résultats du clustering appliquées 
+à nos données du test. 
+```{r}
+set.seed(123)
+gap_stat <- clusGap(t(data[,1:71]), FUN = kmeans,K.max = 15, B = 10)
+fviz_gap_stat(gap_stat)
+```
+
+
+
+```{r}
+k.max <- 15
+wss <- sapply(1:k.max, 
+              function(k){kmeans(t(data[,1:71]), k, nstart=50,iter.max = 15)$tot.withinss})
+
+plot(1:k.max, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+
+```
+```{r}
+final <- kmeans(t(data[,1:71]), 5, nstart = 25)
+fviz_cluster(final, data = t(data[,1:71]))
+```
+Maintenant on va visualiser la distribution des protèines qui sont dans la meme classe:
+
+```{r}
+p1 <- ggplot(data_1, aes(pCAMKII_N)) +
+  geom_histogram(aes(fill=..count..), color = "black", alpha = 0.5) +
+  scale_fill_gradient("Count", low="darkblue", high="yellow") +
+  labs(title = "Protein: pCAMKII_N",
+       x = "Expression Level",
+       y = "Count")
+
+
+p2 <- ggplot(data_1, aes(x = class, y = pCAMKII_N)) +
+  geom_boxplot(aes(fill = class), alpha = 0.7) +
+  scale_fill_manual(values=c("#E59866", "darkblue", "#BA4A00", "#BDC3C7","#717D7E",
+                             "#616A6B","#DC7633", "purple"))+
+  stat_summary(fun.y=mean, colour="blue", geom="point", size=2) 
+
+grid.arrange(p1,p2,nrow=2,ncol=1)
+```
+
+```{r}
+p1 <- ggplot(data_1, aes(NR2A_N)) +
+  geom_histogram(aes(fill=..count..), color = "black", alpha = 0.5) +
+  scale_fill_gradient("Count", low="darkblue", high="yellow") +
+  labs(title = "Protein: NR2A_N",
+       x = "Expression Level",
+       y = "Count")
+
+
+p2 <- ggplot(data_1, aes(x = class, y = NR2A_N)) +
+  geom_boxplot(aes(fill = class), alpha = 0.7) +
+  scale_fill_manual(values=c("#E59866", "darkblue", "#BA4A00", "#BDC3C7","#717D7E",
+                             "#616A6B","#DC7633", "purple"))+
+  stat_summary(fun.y=mean, colour="blue", geom="point", size=2) 
+
+grid.arrange(p1,p2,nrow=2,ncol=1)
+
+```
+```{r}
+p1 <- ggplot(data_1, aes(PSD95_N)) +
+  geom_histogram(aes(fill=..count..), color = "black", alpha = 0.5) +
+  scale_fill_gradient("Count", low="darkblue", high="yellow") +
+  labs(title = "Protein: PSD95_N",
+       x = "Expression Level",
+       y = "Count")
+
+
+p2 <- ggplot(data_1, aes(x = class, y = PSD95_N)) +
+  geom_boxplot(aes(fill = class), alpha = 0.7) +
+  scale_fill_manual(values=c("#E59866", "darkblue", "#BA4A00", "#BDC3C7","#717D7E",
+                             "#616A6B","#DC7633", "purple"))+
+  stat_summary(fun.y=mean, colour="blue", geom="point", size=2) 
+
+grid.arrange(p1,p2,nrow=2,ncol=1)
+```
+```{r}
+p1 <- ggplot(data_1, aes(Bcatenin_N)) +
+  geom_histogram(aes(fill=..count..), color = "black", alpha = 0.5) +
+  scale_fill_gradient("Count", low="darkblue", high="yellow") +
+  labs(title = "Protein: Bcatenin_N",
+       x = "Expression Level",
+       y = "Count")
+
+
+p2 <- ggplot(data_1, aes(x = class, y = Bcatenin_N)) +
+  geom_boxplot(aes(fill = class), alpha = 0.7) +
+  scale_fill_manual(values=c("#E59866", "darkblue", "#BA4A00", "#BDC3C7","#717D7E",
+                             "#616A6B","#DC7633", "purple"))+
+  stat_summary(fun.y=mean, colour="blue", geom="point", size=2) 
+
+grid.arrange(p1,p2,nrow=2,ncol=1)
+```
+```{r}
+p1 <- ggplot(data_1, aes(ERK_N)) +
+  geom_histogram(aes(fill=..count..), color = "black", alpha = 0.5) +
+  scale_fill_gradient("Count", low="darkblue", high="yellow") +
+  labs(title = "Protein: ERK_N",
+       x = "Expression Level",
+       y = "Count")
+
+
+p2 <- ggplot(data_1, aes(x = class, y = ERK_N)) +
+  geom_boxplot(aes(fill = class), alpha = 0.7) +
+  scale_fill_manual(values=c("#E59866", "darkblue", "#BA4A00", "#BDC3C7","#717D7E",
+                             "#616A6B","#DC7633", "purple"))+
+  stat_summary(fun.y=mean, colour="blue", geom="point", size=2) 
+
+grid.arrange(p1,p2,nrow=2,ncol=1)
+
+```
+
+
+```{r}
+
+p1 <- ggplot(data_1, aes(pCASP9_N)) +
+  geom_histogram(aes(fill=..count..), color = "black", alpha = 0.5) +
+  scale_fill_gradient("Count", low="darkblue", high="yellow") +
+  labs(title = "Protein: pCASP9_N",
+       x = "Expression Level",
+       y = "Count")
+
+
+p2 <- ggplot(data_1, aes(x = class, y = pCASP9_N)) +
+  geom_boxplot(aes(fill = class), alpha = 0.7) +
+  scale_fill_manual(values=c("#E59866", "darkblue", "#BA4A00", "#BDC3C7","#717D7E",
+                             "#616A6B","#DC7633", "purple"))+
+  stat_summary(fun.y=mean, colour="blue", geom="point", size=2) 
+
+grid.arrange(p1,p2,nrow=2,ncol=1)
+```
+
+On peut interpréter que 5 clusters donnent une meilleure information sur le nombre significatif de protéines qui prédisent le plus le comportement des souris
+
+
+
+
+
+
+
+
+
+
+
+
+
+
